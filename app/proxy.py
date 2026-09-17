@@ -58,6 +58,7 @@ from .model_rates import (
     parse_model_name,
     strip_model_suffix,
     sync_model_rates,
+    sync_one_model,
 )
 from .scheduler import CronLoop
 
@@ -110,24 +111,6 @@ async def lifespan(app: FastAPI):
     _CRON.start()
     import logging
     logging.basicConfig(level=logging.INFO)
-    # 启动时自动触发倍率同步（若距上次同步 >24h）
-    try:
-        from .model_rates import get_last_sync, sync_model_rates as _sync_rates
-        import time as _time
-        if _time.time() - get_last_sync() > 86400:
-            sys.stderr.write("[model_rates] 首次启动，触发倍率同步...\n")
-            models = get_available_models()
-            region = "intl" if "workbuddy.ai" in BACKEND else "cn"
-            await _sync_rates(
-                backend=BACKEND,
-                get_account_token_fn=_get_first_token,
-                region=region,
-                models=models,
-                user_agent=USER_AGENT,
-                domain=DEFAULT_DOMAIN,
-            )
-    except Exception as e:
-        sys.stderr.write(f"[model_rates] 倍率同步失败: {e}\n")
     try:
         yield
     finally:

@@ -26,7 +26,7 @@ from typing import Optional
 # 倍率缓存（内存 + 持久化）
 # ---------------------------------------------------------------------------
 _CACHE_FILE: Path | None = None
-_rates_cache: dict[str, float] = {}   # key = "model:region", value = credit_rate
+_rates_cache: dict[str, float | None] = {}   # key = "model:region", value = credit_rate 或 None
 _last_sync: float = 0.0
 
 # 基准积分（gpt-5.5 约 0.07 credit / 47 tokens 作为 1.0 基准）
@@ -64,14 +64,20 @@ def _save_cache():
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_rate(model: str, region: str) -> float:
-    """获取模型在指定地区的积分倍率。若无缓存返回 1.0。"""
-    return _rates_cache.get(f"{model}:{region}", 1.0)
+def get_rate(model: str, region: str) -> float | None:
+    """获取模型在指定地区的积分倍率。未同步过（无数据）返回 None。"""
+    return _rates_cache.get(f"{model}:{region}")
 
 
-def update_rate(model: str, region: str, rate: float):
-    """更新指定模型的积分倍率。"""
+def update_rate(model: str, region: str, rate: float | None):
+    """更新指定模型的积分倍率（None = 无数据/未同步）。"""
     _rates_cache[f"{model}:{region}"] = rate
+    _save_cache()
+
+
+def delete_rate(model: str, region: str):
+    """删除指定模型的倍率记录。"""
+    _rates_cache.pop(f"{model}:{region}", None)
     _save_cache()
 
 
@@ -109,10 +115,12 @@ def parse_model_name(raw_model: str) -> tuple[str, str, str]:
     return raw_model, "", ""
 
 
-def build_model_display(upstream: str, region: str, rate: float) -> str:
-    """构建展示用模型名（含地区标签 + 倍率）。"""
+def build_model_display(upstream: str, region: str, rate: float | None) -> str:
+    """构建展示用模型名（含地区标签 + 倍率）。倍率未知时显示 none。"""
     if not region:
         return upstream
+    if rate is None:
+        return f"{upstream}:{region}:none"
     return f"{upstream}:{region}:{rate:.2f}"
 
 
@@ -148,7 +156,7 @@ def build_model_list(base_models: list[str], region: str) -> list[dict]:
     result = []
     seen = set()
     for m in base_models:
-        rate = get_rate(m, region) if region else 1.0
+        rate = get_rate(m, region) if region else None
         # 带后缀版本（推荐使用）
         display = build_model_display(m, region, rate)
         if display not in seen:
@@ -182,90 +190,110 @@ def build_model_list(base_models: list[str], region: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 倍率自动同步（每日定时任务调用）
 # ---------------------------------------------------------------------------
-async def sync_model_rates(backend: str, get_account_token_fn, region: str,
-                           models: list[str], user_agent: str, domain: str):
+async def sync_one_model(backend: str, token: str, region: str, model: str,
+                         user_agent: str, domain: str) -> dict:
     """
-    对每个模型发送标准 prompt，从 usage.credit 推算积分倍率，更新缓存。
-    由 scheduler 每日定时触发。
+    对单个模型发送标准 prompt，从 usage.credit 推算积分倍率，更新缓存。
+    不返回 credit 的模型倍率置为 None（显示 none）。
+
+    Returns:
+        {"model": ..., "rate": float|None, "credit": float, "tokens": int, "ok": bool}
     """
     import httpx
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a test bot. Reply with exactly one word: test"},
+            {"role": "user", "content": "test"},
+        ],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": user_agent,
+        "X-Domain": domain,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"{backend}/v2/chat/completions", json=body, headers=headers)
+        if r.status_code != 200:
+            return {"model": model, "rate": None, "credit": 0.0, "tokens": 0,
+                    "ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        credit = 0.0
+        tokens = 0
+        for line in r.text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+                usage = chunk.get("usage") or {}
+                if usage.get("credit", 0) > 0:
+                    credit = usage["credit"]
+                if usage.get("total_tokens", 0) > 0:
+                    tokens = usage["total_tokens"]
+            except json.JSONDecodeError:
+                continue
+        if credit > 0 and tokens > 0:
+            estimated_rate = round(credit / _BASE_CREDIT * (_BASE_TOKENS / tokens), 2)
+            estimated_rate = max(0.1, min(10.0, estimated_rate))
+            update_rate(model, region, estimated_rate)
+            return {"model": model, "rate": estimated_rate, "credit": credit,
+                    "tokens": tokens, "ok": True}
+        else:
+            update_rate(model, region, None)
+            return {"model": model, "rate": None, "credit": credit,
+                    "tokens": tokens, "ok": True}  # ok=True 表示已尝试（结果可能是 none）
+    except Exception as e:
+        return {"model": model, "rate": None, "credit": 0.0, "tokens": 0,
+                "ok": False, "error": str(e)[:300]}
+
+
+async def sync_model_rates(backend: str, get_account_token_fn, region: str,
+                           models: list[str], user_agent: str, domain: str) -> dict:
+    """
+    对每个模型逐个同步倍率（首个账号导入/初始化时自动触发一次）。
+    不做每日自动同步；后台可对单个模型手动触发。
+
+    Returns:
+        {"updated": n, "none": n, "failed": n, "results": [...]}
+    """
+    import asyncio as _asyncio
 
     token = get_account_token_fn()
     if not token:
         sys.stderr.write(f"[model_rates] {region}: 无可用 token，跳过同步\n")
-        return
+        return {"updated": 0, "none": 0, "failed": 0, "results": [], "error": "无可用 token"}
 
-    std_prompt = "Reply with exactly one word: test"
-    updated = 0
-    import asyncio as _asyncio
-    async with httpx.AsyncClient(timeout=60) as client:
-        for i, model in enumerate(models):
-            # 跳过非通用模型（default/fast 等别名）
-            if model in ("default-model", "fast-model", "balanced-model",
-                         "primary-model", "deep-model"):
-                continue
-            # 避免触发限流：每 3 个请求后暂停 5 秒
-            if i > 0 and i % 3 == 0:
-                sys.stderr.write(f"[model_rates] {region}: 暂停 5s 避免限流...\n")
-                await _asyncio.sleep(5)
-            try:
-                body = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a test bot. Reply with exactly one word: test"},
-                        {"role": "user", "content": "test"},
-                    ],
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": user_agent,
-                    "X-Domain": domain,
-                }
-                r = await client.post(
-                    f"{backend}/v2/chat/completions",
-                    json=body, headers=headers,
-                )
-                if r.status_code != 200:
-                    err_body = r.text[:300]
-                    sys.stderr.write(
-                        f"[model_rates] {region} {model}: HTTP {r.status_code} → {err_body}\n")
-                    continue
-                # 流式响应：解析 SSE 提取 usage
-                credit = 0.0
-                tokens = 0
-                for line in r.text.splitlines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        usage = chunk.get("usage") or {}
-                        if usage.get("credit", 0) > 0:
-                            credit = usage["credit"]
-                        if usage.get("total_tokens", 0) > 0:
-                            tokens = usage["total_tokens"]
-                    except json.JSONDecodeError:
-                        continue
-                if credit > 0 and tokens > 0:
-                    estimated_rate = round(credit / _BASE_CREDIT * (_BASE_TOKENS / tokens), 2)
-                    estimated_rate = max(0.1, min(10.0, estimated_rate))
-                    update_rate(model, region, estimated_rate)
-                    updated += 1
-                    sys.stderr.write(
-                        f"[model_rates] {region} {model}: credit={credit}, "
-                        f"tokens={tokens}, rate={estimated_rate}\n")
-                else:
-                    sys.stderr.write(
-                        f"[model_rates] {region} {model}: 无 credit 数据 (credit={credit}, tokens={tokens})\n")
-            except Exception as e:
-                sys.stderr.write(
-                    f"[model_rates] {region} {model}: 异常 {e}\n")
+    results = []
+    updated = none_count = failed = 0
+    for i, model in enumerate(models):
+        if model in ("default-model", "fast-model", "balanced-model",
+                     "primary-model", "deep-model"):
+            continue
+        if i > 0 and i % 3 == 0:
+            sys.stderr.write(f"[model_rates] {region}: 暂停 5s 避免限流...\n")
+            await _asyncio.sleep(5)
+        res = await sync_one_model(backend, token, region, model, user_agent, domain)
+        results.append(res)
+        if not res.get("ok"):
+            failed += 1
+        elif res.get("rate") is not None:
+            updated += 1
+        else:
+            none_count += 1
+        if res.get("rate") is not None:
+            sys.stderr.write(f"[model_rates] {region} {model}: rate={res['rate']} (credit={res.get('credit')}, tokens={res.get('tokens')})\n")
+        else:
+            sys.stderr.write(f"[model_rates] {region} {model}: 无 credit 数据 → rate=none\n")
 
     set_last_sync(time.time())
+    summary = {"updated": updated, "none": none_count, "failed": failed, "results": results}
     sys.stderr.write(
-        f"[model_rates] {region}: 同步完成，更新 {updated}/{len(models)} 个模型\n")
+        f"[model_rates] {region}: 同步完成 (updated={updated}, none={none_count}, failed={failed})\n")
+    return summary

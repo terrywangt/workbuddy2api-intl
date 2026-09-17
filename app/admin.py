@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import time
 
 from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Request, UploadFile
@@ -229,6 +230,31 @@ async def add_account(request: Request, _: None = Depends(_require_admin)):
         fields = pool.add(auth_json)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 导入第一个账号时自动触发一次倍率计算（后台任务，不阻塞导入响应）
+    try:
+        accounts = db.list_accounts()
+        if len([a for a in accounts if a["enabled"]]) == 1:
+            import asyncio as _asyncio
+            region = _proxy._get_region()
+
+            async def _first_sync():
+                from .model_rates import get_last_sync
+                # 仅当从未同步过才触发（有数据则不重复算）
+                if get_last_sync() > 0:
+                    return
+                sys.stderr.write("[model_rates] 首次导入账号，自动触发倍率计算...\n")
+                await sync_model_rates(
+                    backend=_proxy.BACKEND,
+                    get_account_token_fn=_proxy._get_first_token,
+                    region=region,
+                    models=_proxy.get_available_models(),
+                    user_agent=_proxy.USER_AGENT,
+                    domain=_proxy.DEFAULT_DOMAIN,
+                )
+
+            _asyncio.create_task(_first_sync())
+    except Exception as e:
+        sys.stderr.write(f"[model_rates] 首次同步触发失败: {e}\n")
     return {"ok": True, "uid": fields["uid"]}
 
 
@@ -322,4 +348,91 @@ def api_key_patch(key_id: int, body: dict, _: None = Depends(_require_admin)):
 @router.delete("/api-keys/{key_id}")
 def api_key_delete(key_id: int, _: None = Depends(_require_admin)):
     db.delete_api_key(key_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 模型倍率管理
+# ---------------------------------------------------------------------------
+from . import proxy as _proxy
+from .model_rates import (
+    get_rate, update_rate, delete_rate, get_last_sync, set_last_sync,
+    sync_one_model, sync_model_rates,
+)
+
+
+@router.get("/model-rates")
+def model_rates_list(_: None = Depends(_require_admin)):
+    """返回全部模型倍率（从缓存读取，含 last_sync）。"""
+    from .model_rates import _rates_cache
+    return {
+        "rates": {k: v for k, v in _rates_cache.items()},
+        "last_sync": get_last_sync(),
+        "models": _proxy.get_available_models(),
+        "region": _proxy._get_region(),
+    }
+
+
+@router.post("/model-rates/sync")
+async def model_rates_sync(_: None = Depends(_require_admin)):
+    """全量批量同步（首次账号导入时会自动触发一次，此后由管理员手动触发）。"""
+    token = _proxy._get_first_token()
+    if not token:
+        raise HTTPException(400, "无可用账号，请先导入账号")
+    result = await sync_model_rates(
+        backend=_proxy.BACKEND,
+        get_account_token_fn=_proxy._get_first_token,
+        region=_proxy._get_region(),
+        models=_proxy.get_available_models(),
+        user_agent=_proxy.USER_AGENT,
+        domain=_proxy.DEFAULT_DOMAIN,
+    )
+    return {"ok": True, **result}
+
+
+@router.post("/model-rates/sync/{model}")
+async def model_rates_sync_one(model: str, _: None = Depends(_require_admin)):
+    """单模型触发倍率计算。"""
+    token = _proxy._get_first_token()
+    if not token:
+        raise HTTPException(400, "无可用账号")
+    res = await sync_one_model(
+        backend=_proxy.BACKEND,
+        token=token,
+        region=_proxy._get_region(),
+        model=model,
+        user_agent=_proxy.USER_AGENT,
+        domain=_proxy.DEFAULT_DOMAIN,
+    )
+    return {"ok": True, **res}
+
+
+@router.post("/model-rates/edit")
+def model_rates_edit(body: dict, _: None = Depends(_require_admin)):
+    """手动编辑倍率。body: {model: str, region: str, rate: float|null}。"""
+    model = (body.get("model") or "").strip()
+    region = (body.get("region") or _proxy._get_region()).strip()
+    rate_raw = body.get("rate")
+    if not model:
+        raise HTTPException(400, "model 必填")
+    if rate_raw is None or rate_raw == "none":
+        rate = None
+    else:
+        try:
+            rate = round(float(rate_raw), 2)
+            rate = max(0.1, min(10.0, rate))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "rate 必须是数字或 none")
+    update_rate(model, region, rate)
+    return {"ok": True, "model": model, "region": region, "rate": rate}
+
+
+@router.post("/model-rates/delete")
+def model_rates_delete(body: dict, _: None = Depends(_require_admin)):
+    """删除某模型的倍率记录。body: {model: str, region: str}。"""
+    model = (body.get("model") or "").strip()
+    region = (body.get("region") or _proxy._get_region()).strip()
+    if not model:
+        raise HTTPException(400, "model 必填")
+    delete_rate(model, region)
     return {"ok": True}

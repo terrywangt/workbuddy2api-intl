@@ -73,12 +73,14 @@ th{color:var(--mut);font-weight:500}
     <button data-tab="logs">签到日志</button>
     <button data-tab="stats">运行状态</button>
     <button data-tab="settings">设置</button>
+    <button data-tab="rates">模型倍率</button>
   </div>
 
   <div id="tab-accounts"></div>
   <div id="tab-logs" class="hidden"></div>
   <div id="tab-stats" class="hidden"></div>
   <div id="tab-settings" class="hidden"></div>
+  <div id="tab-rates" class="hidden"></div>
 </div>
 
 <!-- 添加账号弹窗 -->
@@ -250,10 +252,50 @@ async function loadSettings(){
     </div>`;
 }
 
+async function loadRates(){
+  const box=document.getElementById('tab-rates');
+  const j=await (await fetch(API+'/model-rates')).json();
+  const rates=j.rates||{};
+  const models=j.models||[];
+  const region=j.region||'?';
+  let rows='';
+  for(const m of models){
+    const key=m+':'+region;
+    const rate=rates[key];
+    const rateDisplay=(rate===null||rate===undefined)?'<span class="mut">none</span>':Number(rate).toFixed(2);
+    const rateClass=(rate===null||rate===undefined)?'mut':(rate<1?'ok':rate>1?'warn':'');
+    rows+=`<tr>
+      <td class="mono">${m}</td>
+      <td><span class="pill ${rateClass}">${rateDisplay}</span></td>
+      <td>
+        <input type="number" min="0.1" max="10" step="0.01" class="rate-input" data-model="${m}" value="${rate??''}" style="width:80px;display:inline-block" placeholder="none">
+        <button class="rate-save" data-model="${m}" style="margin-left:4px">保存</button>
+        <button class="rate-sync" data-model="${m}" style="margin-left:4px">计算</button>
+        <button class="rate-del danger" data-model="${m}" style="margin-left:4px">删除</button>
+      </td>
+    </tr>`;
+  }
+  const lastSync=j.last_sync?new Date(j.last_sync*1000).toLocaleString():'从未';
+  box.innerHTML=`
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <h2 style="margin:0">模型倍率 · ${region}</h2>
+        <button class="primary" id="rateSyncAllBtn">全量重新计算</button>
+        <span class="mut" style="margin-left:auto">上次同步：${lastSync}</span>
+      </div>
+      <table>
+        <thead><tr><th>模型</th><th>当前倍率</th><th>操作</th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="3" class="mut">暂无模型</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+
 async function refresh(){
   if(curTab==='accounts')await loadAccounts();
   else if(curTab==='logs')await loadLogs();
   else if(curTab==='stats')await loadStats();
+  else if(curTab==='rates')await loadRates();
   else await loadSettings();
 }
 
@@ -284,7 +326,7 @@ document.addEventListener('click',async e=>{
   }
   if(btn.dataset.tab){curTab=btn.dataset.tab;
     document.querySelectorAll('#mainView .tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
-    ['accounts','logs','stats','settings'].forEach(t=>document.getElementById('tab-'+t).classList.toggle('hidden',t!==curTab));
+    ['accounts','logs','stats','settings','rates'].forEach(t=>document.getElementById('tab-'+t).classList.toggle('hidden',t!==curTab));
     refresh();return;
   }
   if(btn.dataset.amt){
@@ -358,6 +400,34 @@ document.addEventListener('click',async e=>{
       alert('密码已更新 ✓');
     }catch(e){errBox.textContent=String(e.message||e)}
     return;
+  }
+  // 倍率管理按钮
+  if(btn.id==='rateSyncAllBtn'){
+    btn.disabled=true;btn.textContent='计算中…';
+    try{const r=await api('/model-rates/sync',{method:'POST'});
+      btn.textContent=`完成 (updated=${r.updated}, none=${r.none})`;}catch(e){btn.textContent='失败: '+e.message}
+    btn.disabled=false;setTimeout(()=>{btn.textContent='全量重新计算'},3000);loadRates();return;
+  }
+  if(btn.classList.contains('rate-sync')){
+    const m=btn.dataset.model;btn.disabled=true;btn.textContent='…';
+    try{const r=await api('/model-rates/sync/'+encodeURIComponent(m),{method:'POST'});
+      btn.textContent=r.rate!==null?r.rate.toFixed(2):'none';}catch(e){btn.textContent='err'}
+    btn.disabled=false;setTimeout(()=>{btn.textContent='计算'},2000);loadRates();return;
+  }
+  if(btn.classList.contains('rate-save')){
+    const m=btn.dataset.model;
+    const input=document.querySelector(`.rate-input[data-model="${m}"]`);
+    const val=input.value.trim();
+    try{await api('/model-rates/edit',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:m,rate:val||null})});}catch(e){}
+    loadRates();return;
+  }
+  if(btn.classList.contains('rate-del')){
+    if(!confirm('删除该模型的倍率？'))return;
+    const m=btn.dataset.model;
+    await api('/model-rates/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:m})}).catch(()=>{});
+    loadRates();return;
   }
 });
 
