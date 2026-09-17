@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy 管理台 · workbuddy-allinone</title>
+<style>
+:root{--bg:#0f1419;--card:#161c24;--line:#253040;--txt:#e6edf3;--mut:#8b98a5;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);min-height:100vh}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:20px;margin-bottom:4px}
+h2{font-size:16px;margin:20px 0 10px}
+.sub{color:var(--mut);font-size:12px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:12px}
+.topbar{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+.grow{flex:1}
+button{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px}
+button:hover{filter:brightness(1.2)}
+button.primary{background:var(--acc);border-color:var(--acc)}
+button.danger{background:var(--err);border-color:var(--err)}
+button:disabled{opacity:.5;cursor:not-allowed}
+input,textarea{width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--txt);font:inherit;margin:4px 0 10px}
+label{font-size:12px;color:var(--mut)}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;margin-left:6px}
+.ok{background:rgba(34,197,94,.15);color:var(--ok)}
+.warn{background:rgba(245,158,11,.15);color:var(--warn)}
+.err{background:rgba(239,68,68,.15);color:var(--err)}
+.mut{color:var(--mut)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:500}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
+.tabs{display:flex;gap:4px;margin-bottom:16px}
+.tabs button.active{background:var(--acc);border-color:var(--acc)}
+.hidden{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+#loginBox{max-width:420px;margin:15vh auto}
+#loginBox h1{text-align:center}
+.errmsg{color:var(--err);font-size:13px;margin-top:8px;min-height:20px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:10}
+.modal.show{display:flex}
+.modal .card{width:min(560px,100%);background:#10161d}
+.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.stat .cell{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
+.stat .cell b{display:block;font-size:22px}
+</style>
+</head>
+<body>
+
+<div class="wrap" id="loginView">
+  <div class="card" id="loginBox">
+    <h1>🔑 WorkBuddy 管理台</h1>
+    <div class="sub" style="text-align:center">登录后管理授权账号、查看签到、手动签到</div>
+    <label>管理员密码</label>
+    <input type="password" id="pw" placeholder="请输入 ADMIN_PASSWORD" autocomplete="current-password">
+    <button class="primary" style="width:100%" id="loginBtn">登录</button>
+    <div class="errmsg" id="loginErr"></div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="mainView">
+  <div class="topbar">
+    <h1>WorkBuddy 管理台</h1>
+    <span class="grow"></span>
+    <button id="addBtn" class="primary">＋ 添加账号</button>
+    <button id="signAllBtn">全部立即签到</button>
+    <button id="logoutBtn">退出</button>
+  </div>
+
+  <div class="tabs">
+    <button class="active" data-tab="accounts">账号</button>
+    <button data-tab="logs">签到日志</button>
+    <button data-tab="stats">运行状态</button>
+    <button data-tab="settings">设置</button>
+  </div>
+
+  <div id="tab-accounts"></div>
+  <div id="tab-logs" class="hidden"></div>
+  <div id="tab-stats" class="hidden"></div>
+  <div id="tab-settings" class="hidden"></div>
+</div>
+
+<!-- 添加账号弹窗 -->
+<div class="modal" id="addModal">
+  <div class="card">
+    <h2>添加授权账号</h2>
+    <div class="tabs">
+      <button class="active" data-amt="file">上传文件</button>
+      <button data-amt="json">粘贴 JSON</button>
+      <button data-amt="manual">手动填写</button>
+    </div>
+
+    <div class="am-pane" data-am="file">
+      <label>选择 workbuddy 授权文件（workbuddy-desktop.info 或导出的 .json）</label>
+      <input type="file" id="authFile" accept=".json,.info">
+      <div class="mut" style="margin-top:10px;font-size:12px;line-height:1.7;background:#0b0f14;border-radius:8px;padding:10px">
+        📂 <b>授权文件在哪找？</b>（登录过 WorkBuddy/CodeBuddy 桌面端后自动生成）<br>
+        • <b>Windows</b>：<span class="mono">%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info</span><br>
+        &nbsp;&nbsp;&nbsp;&nbsp;（资源管理器地址栏粘贴 <span class="mono">%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth</span> 回车）<br>
+        • <b>macOS</b>：<span class="mono">~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info</span><br>
+        • <b>Linux</b>：<span class="mono">~/.config/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info</span><br>
+        • 没有桌面端？可到 workbuddy.cn 网页登录后，用浏览器开发者工具 Network 面板导出接口返回的完整登录 JSON
+      </div>
+    </div>
+    <div class="am-pane hidden" data-am="json">
+      <label>粘贴完整授权 JSON（含 account 和 auth）</label>
+      <textarea id="authJson" rows="8" placeholder='{"account":{...},"auth":{...}}'></textarea>
+    </div>
+    <div class="am-pane hidden" data-am="manual">
+      <label>uid</label>
+      <input id="mUid" placeholder="账号 uid">
+      <label>accessToken</label>
+      <input id="mToken" placeholder="Bearer token（不含 Bearer 前缀）">
+      <label>refreshToken（填了才能自动续期，推荐）</label>
+      <input id="mRefresh" placeholder="refresh token（可选）">
+      <label>昵称（可选）</label>
+      <input id="mNick" placeholder="显示名称，默认取 uid">
+    </div>
+
+    <div class="errmsg" id="addErr"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button id="cancelAdd">取消</button>
+      <button class="primary" id="confirmAdd">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API='/api/admin';
+let curTab='accounts';
+
+function h(html){return html}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function fmtTs(ts){return ts?new Date(ts*1000).toLocaleString('zh-CN',{hour12:false}):'—'}
+
+async function api(path,opts={}){
+  const r=await fetch(API+path,opts);
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){
+    if(r.status===401){document.getElementById('loginView').classList.remove('hidden');document.getElementById('mainView').classList.add('hidden');
+      throw new Error('登录已过期')}
+    throw new Error((j.detail||r.statusText||'请求失败'));
+  }
+  return j;
+}
+
+async function loadAccounts(){
+  const j=await api('/accounts');
+  const box=document.getElementById('tab-accounts');
+  if(!j.accounts.length){box.innerHTML='<div class="card mut">还没有账号。点右上角「添加账号」上传授权文件或填写 token。</div>';return}
+  let t='<h2>授权账号（'+j.accounts.length+'）</h2><div class="grid">';
+  for(const a of j.accounts){
+    const stateCls=a.auth_state==='ok'?'ok':a.auth_state==='expired'?'warn':'err';
+    const stateTxt={ok:'有效',expired:'已过期·可刷新',dead:'已失效·需重传'}[a.auth_state]||a.auth_state;
+    t+=`<div class="card">
+      <div style="display:flex;align-items:center;gap:6px"><b>${esc(a.nickname||a.uid)}</b>
+        <span class="pill ${stateCls}">${stateTxt}</span>
+        ${a.enabled?'':'<span class="pill err">已停用</span>'}</div>
+      <div class="mut mono" style="margin-top:4px;font-size:11px">uid ${esc(a.uid)}</div>
+      <div class="mut" style="margin-top:2px">${a.phone_mask?('手机 '+esc(a.phone_mask)):'无手机号'}</div>
+      <div class="mut" style="margin-top:2px">access 到期 ${fmtTs(a.expires_at/1000)}${a.refresh_expires_at?' ｜ refresh 到期 '+fmtTs(a.refresh_expires_at/1000):''}</div>
+      <div class="mut" style="margin-top:2px">上次签到 ${fmtTs(a.last_signin_at)}</div>
+      ${a.last_report?`<div class="mut mono" style="margin-top:6px;background:#0b0f14;border-radius:6px;padding:6px 8px;font-size:11px">${esc(a.last_report)}</div>`:''}
+      <div style="display:flex;gap:6px;margin-top:12px">
+        <button data-act="signin" data-id="${a.id}">立即签到</button>
+        <button data-act="toggle" data-id="${a.id}">${a.enabled?'停用':'启用'}</button>
+        <button class="danger" data-act="del" data-id="${a.id}" style="margin-left:auto">删除</button>
+      </div></div>`;
+  }
+  box.innerHTML=t+'</div>';
+}
+
+async function loadLogs(){
+  const j=await api('/logs?limit=100');
+  const box=document.getElementById('tab-logs');
+  if(!j.logs.length){box.innerHTML='<div class="card mut">暂无签到日志。</div>';return}
+  let t='<h2>签到日志（最近 100 条）</h2><table><tr><th>账号</th><th>来源</th><th>结果</th><th>时间</th><th>详情</th></tr>';
+  for(const l of j.logs){
+    const cls={CLAIMED:'ok',ALREADY:'ok',INACTIVE:'warn',NO_SESSION:'err',ERROR:'err',NETWORK:'warn',TIMEOUT:'warn',GROWTH:'ok'}[l.result]||'warn';
+    t+=`<tr><td>${esc(l.nickname||l.uid||('#'+l.account_id))}</td><td>${l.kind==='manual'?'手动':'定时'}</td>
+      <td><span class="pill ${cls}">${l.result||'—'}</span></td><td style="white-space:nowrap">${fmtTs(l.created_at)}</td>
+      <td class="mono" style="max-width:420px">${esc(l.report)}</td></tr>`;
+  }
+  box.innerHTML=t+'</table>';
+}
+
+async function loadStats(){
+  const j=await api('/status');
+  const s=j.stats||{};
+  document.getElementById('tab-stats').innerHTML=`
+    <h2>运行状态</h2>
+    <div class="stat">
+      <div class="cell"><b>${s.total||0}</b>授权账号</div>
+      <div class="cell"><b>${s.enabled||0}</b>启用中</div>
+      <div class="cell"><b>${s.refresh_expired||0}</b>需重新上传</div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="mut">每日自动签到：<b>${esc(j.cron.daily||'—')}</b>（Asia/Shanghai）</div>
+      <div class="mut" style="margin-top:4px">补签轮询：<b>${esc(j.cron.poll||'—')}</b></div>
+      <div class="mut" style="margin-top:4px">定时签到会在每日/轮询时点对全部启用账号自动执行，日志可在「签到日志」查看。</div>
+    </div>`;
+}
+
+async function loadSettings(){
+  const j=await api('/settings');
+  let keys='';
+  if(j.api_keys&&j.api_keys.length){
+    keys='<table><tr><th>名称</th><th>Key（前缀）</th><th>状态</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr>';
+    for(const k of j.api_keys){
+      keys+=`<tr><td>${esc(k.name)}</td><td class="mono">${esc(k.prefix)}…</td>
+        <td>${k.enabled?'<span class="pill ok">启用</span>':'<span class="pill err">停用</span>'}</td>
+        <td class="mut">${fmtTs(k.last_used_at)}</td><td class="mut">${fmtTs(k.created_at)}</td>
+        <td><button data-ksact="toggle" data-ksid="${k.id}">${k.enabled?'停用':'启用'}</button>
+        <button class="danger" data-ksact="del" data-ksid="${k.id}">删除</button></td></tr>`;
+    }
+    keys+='</table>';
+  }else keys='<div class="card mut">还没有 API Key。生成一个才能调用 /v1/* 接口（防别人盗用你的账号额度）。</div>';
+  document.getElementById('tab-settings').innerHTML=`
+    <h2>API 鉴权（/v1/chat/completions 等）</h2>
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px">
+        <b>要求 API Key：</b>
+        <button class="${j.api_auth_enabled?'primary':''}" data-kset="toggle-auth">${j.api_auth_enabled?'已开启':'已关闭'}</button>
+        <span class="mut" style="font-size:12px">开启后所有 /v1/* 请求必须携带 <span class="mono">Authorization: Bearer &lt;key&gt;</span>（或 <span class="mono">X-Api-Key</span>），防止公网盗刷。</span>
+      </div>
+    </div>
+    <h2>API Keys</h2>
+    <div class="card">
+      ${keys}
+      <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+        <label>名称（必填，如：我的脚本 / 朋友）</label>
+        <input id="keyName" placeholder="例如：Claude Code">
+        <label>自定义 Key（可选，留空则自动生成 48 位随机串）</label>
+        <input id="keyCustom" class="mono" placeholder="留空自动生成">
+        <div id="newKeyBox"></div>
+        <button class="primary" data-kset="add-key">＋ 生成 API Key</button>
+      </div>
+    </div>
+    <h2>修改管理员密码</h2>
+    <div class="card" style="max-width:420px">
+      <label>旧密码</label>
+      <input type="password" id="pwOld" autocomplete="current-password">
+      <label>新密码（至少 8 位）</label>
+      <input type="password" id="pwNew" autocomplete="new-password">
+      <label>确认新密码</label>
+      <input type="password" id="pwNew2" autocomplete="new-password">
+      <div class="errmsg" id="pwErr"></div>
+      <button class="primary" data-kset="chpw">更新密码</button>
+    </div>`;
+}
+
+async function refresh(){
+  if(curTab==='accounts')await loadAccounts();
+  else if(curTab==='logs')await loadLogs();
+  else if(curTab==='stats')await loadStats();
+  else await loadSettings();
+}
+
+document.addEventListener('click',async e=>{
+  const btn=e.target.closest('button'); if(!btn)return;
+  if(btn.id==='loginBtn'){
+    const pw=document.getElementById('pw').value;
+    const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+    const j=await r.json();
+    if(!r.ok){document.getElementById('loginErr').textContent=j.detail||'登录失败';return}
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('mainView').classList.remove('hidden');
+    refresh();
+    return;
+  }
+  if(btn.id==='logoutBtn'){
+    await fetch(API+'/logout',{method:'POST'}).catch(()=>{});
+    location.reload();
+    return;
+  }
+  if(btn.id==='addBtn'){document.getElementById('addModal').classList.add('show');return}
+  if(btn.id==='cancelAdd'){document.getElementById('addModal').classList.remove('show');document.getElementById('addErr').textContent='';return}
+  if(btn.id==='confirmAdd'){await submitAdd();return}
+  if(btn.id==='signAllBtn'){
+    const j=await api('/accounts');
+    for(const a of j.accounts){if(a.enabled){await api('/accounts/'+a.id+'/signin',{method:'POST'}).catch(()=>{});}}
+    refresh();return;
+  }
+  if(btn.dataset.tab){curTab=btn.dataset.tab;
+    document.querySelectorAll('#mainView .tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+    ['accounts','logs','stats','settings'].forEach(t=>document.getElementById('tab-'+t).classList.toggle('hidden',t!==curTab));
+    refresh();return;
+  }
+  if(btn.dataset.amt){
+    document.querySelectorAll('#addModal [data-am]').forEach(p=>p.classList.toggle('hidden',p.dataset.am!==btn.dataset.amt));
+    document.querySelectorAll('#addModal .tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+    return;
+  }
+  if(btn.dataset.act&&btn.dataset.id){
+    const id=btn.dataset.id;
+    if(btn.dataset.act==='signin'){btn.disabled=true;btn.textContent='签到中…';
+      await api('/accounts/'+id+'/signin',{method:'POST'}).catch(()=>{});
+      btn.disabled=false;btn.textContent='立即签到';refresh();return;
+    }
+    if(btn.dataset.act==='toggle'){
+      const acc=(await api('/accounts')).accounts.find(a=>a.id==id);
+      await api('/accounts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!acc.enabled})});
+      refresh();return;
+    }
+    if(btn.dataset.act==='del'){
+      if(!confirm('确认删除该账号？删除后 Token 立即失效，无法恢复。'))return;
+      await api('/accounts/'+id,{method:'DELETE'});refresh();return;
+    }
+  }
+  if(btn.dataset.kset==='toggle-auth'){
+    const j=await api('/settings');
+    await api('/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_auth_enabled:!j.api_auth_enabled})});
+    loadSettings();return;
+  }
+  if(btn.dataset.kset==='add-key'){
+    const name=document.getElementById('keyName').value.trim();
+    const custom=document.getElementById('keyCustom').value.trim();
+    const box=document.getElementById('newKeyBox');
+    if(!name){box.innerHTML='<div class="err">名称必填</div>';return}
+    try{
+      const j=await api('/api-keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,key:custom||undefined})});
+      box.innerHTML=`<div class="card" style="border-color:var(--ok);margin:8px 0">
+        ✅ 已生成 <b>${esc(j.name)}</b>（仅显示这一次，请立即保存）：
+        <div class="mono" style="background:#0b0f14;border-radius:6px;padding:8px;margin-top:6px;word-break:break-all">${esc(j.key)}</div>
+        <button id="copyKeyBtn">复制</button>
+      </div>`;
+      document.getElementById('keyName').value='';document.getElementById('keyCustom').value='';
+      document.getElementById('copyKeyBtn').onclick=()=>{navigator.clipboard.writeText(j.key).then(()=>box.querySelector('button').textContent='已复制 ✓')};
+    }catch(e){box.innerHTML='<div class="err">'+esc(e.message)+'</div>'}
+    return;
+  }
+  if(btn.dataset.ket==='copy'){return}
+  if(btn.dataset.ksact&&btn.dataset.ksid){
+    const kid=btn.dataset.ksid;
+    if(btn.dataset.ksact==='toggle'){
+      // 先查当前状态再翻转
+      const j=await api('/settings');
+      const k=j.api_keys.find(x=>String(x.id)===String(kid));
+      await api('/api-keys/'+kid,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!k.enabled})});
+      loadSettings();return;
+    }
+    if(btn.dataset.ksact==='del'){
+      if(!confirm('确认删除该 API Key？使用它的客户端将立即失效。'))return;
+      await api('/api-keys/'+kid,{method:'DELETE'});loadSettings();return;
+    }
+  }
+  if(btn.dataset.kset==='chpw'){
+    const oldPw=document.getElementById('pwOld').value;
+    const newPw=document.getElementById('pwNew').value;
+    const newPw2=document.getElementById('pwNew2').value;
+    const errBox=document.getElementById('pwErr');errBox.textContent='';
+    if(!newPw||newPw.length<8){errBox.textContent='新密码至少 8 位';return}
+    if(newPw!==newPw2){errBox.textContent='两次输入的新密码不一致';return}
+    try{
+      await api('/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_password:oldPw,new_password:newPw})});
+      errBox.textContent='';document.getElementById('pwOld').value='';document.getElementById('pwNew').value='';document.getElementById('pwNew2').value='';
+      alert('密码已更新 ✓');
+    }catch(e){errBox.textContent=String(e.message||e)}
+    return;
+  }
+});
+
+async function submitAdd(){
+  const errBox=document.getElementById('addErr');errBox.textContent='';
+  const activePane=document.querySelector('#addModal .am-pane:not(.hidden)');
+  const mode=activePane.dataset.am;
+  try{
+    if(mode==='file'){
+      const f=document.getElementById('authFile').files[0];
+      if(!f)throw new Error('请选择授权文件');
+      const fd=new FormData();fd.append('file',f);
+      const r=await fetch(API+'/accounts',{method:'POST',body:fd});
+      const j=await r.json();
+      if(!r.ok)throw new Error(j.detail||'上传失败');
+    }else if(mode==='json'){
+      const txt=document.getElementById('authJson').value.trim();
+      if(!txt)throw new Error('请粘贴授权 JSON');
+      const r=await fetch(API+'/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({json_text:txt})});
+      const j=await r.json();
+      if(!r.ok)throw new Error(j.detail||'添加失败');
+    }else{
+      const uid=document.getElementById('mUid').value.trim();
+      const tok=document.getElementById('mToken').value.trim();
+      if(!uid||!tok)throw new Error('uid 和 accessToken 必填');
+      const body={access_token:tok,uid,nickname:document.getElementById('mNick').value.trim()};
+      const ref=document.getElementById('mRefresh').value.trim();
+      if(ref)body.refresh_token=ref;
+      const r=await fetch(API+'/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json();
+      if(!r.ok)throw new Error(j.detail||'添加失败');
+    }
+    document.getElementById('addModal').classList.remove('show');
+    document.getElementById('authFile').value='';document.getElementById('authJson').value='';
+    document.getElementById('mUid').value='';document.getElementById('mToken').value='';
+    document.getElementById('mRefresh').value='';document.getElementById('mNick').value='';
+    await loadAccounts();
+  }catch(e){errBox.textContent=String(e.message||e)}
+}
+
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('loginBtn').click()});
+document.getElementById('loginErr').textContent='';
+</script>
+</body>
+</html>

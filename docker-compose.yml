@@ -1,0 +1,21 @@
+services:
+  workbuddy2api-intl:
+    image: ${IMAGE:-terrywangt/workbuddy2api-intl:latest}
+    container_name: workbuddy2api-intl
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8789}:8789"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请设置 ADMIN_PASSWORD}
+      API_KEY: ${API_KEY:-}
+      SIGNIN_CRON: ${SIGNIN_CRON:-5 0 * * *}
+      SIGNIN_POLL_CRON: ${SIGNIN_POLL_CRON:-0 */6 * * *}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - wb_intl_data:/data
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  wb_intl_data:
