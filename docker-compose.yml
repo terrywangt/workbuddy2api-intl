@@ -1,5 +1,6 @@
 services:
   workbuddy2api-intl:
+    build: .
     image: ${IMAGE:-terrywangt/workbuddy2api-intl:latest}
     container_name: workbuddy2api-intl
     restart: unless-stopped
