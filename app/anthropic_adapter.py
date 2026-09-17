@@ -16,6 +16,8 @@ import os
 import time
 from typing import Any
 
+from .model_rates import decorate_model_name
+
 # ---------------------------------------------------------------------------
 # ID 生成
 # ---------------------------------------------------------------------------
@@ -216,9 +218,10 @@ class AnthropicStreamConverter:
       yield converter.finish().encode()
     """
 
-    def __init__(self, model: str = "unknown"):
+    def __init__(self, model: str = "unknown", region: str = ""):
         self.msg_id = _rand_id("msg_")
         self.model = model
+        self.region = region
         self.created_at = int(time.time())
 
         # 状态
@@ -314,7 +317,7 @@ class AnthropicStreamConverter:
             "type": "message",
             "role": "assistant",
             "content": content,
-            "model": self.model,
+            "model": decorate_model_name(self.model, self.region) if self.region else self.model,
             "stop_reason": stop_reason,
             "stop_sequence": None,
         }

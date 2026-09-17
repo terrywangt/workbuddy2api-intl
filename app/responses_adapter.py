@@ -16,6 +16,8 @@ import os
 import time
 from typing import Any
 
+from .model_rates import decorate_model_name
+
 # ---------------------------------------------------------------------------
 # ID 生成
 # ---------------------------------------------------------------------------
@@ -251,10 +253,11 @@ class ResponsesStreamConverter:
       yield converter.finish().encode()
     """
 
-    def __init__(self, model: str = "unknown"):
+    def __init__(self, model: str = "unknown", region: str = ""):
         self.resp_id = _rand_id("resp_")
         self.msg_id = _rand_id("msg_")
         self.model = model
+        self.region = region
         self.created_at = int(time.time())
 
         # 状态标记
@@ -468,7 +471,7 @@ class ResponsesStreamConverter:
             "object": "response",
             "created_at": self.created_at,
             "status": status,
-            "model": self.model,
+            "model": decorate_model_name(self.model, self.region) if self.region else self.model,
             "output": output,
             "parallel_tool_calls": True,
             "usage": usage,

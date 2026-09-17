@@ -51,6 +51,14 @@ from .responses_adapter import (
 from .responses_projection import project_responses_chat_body
 from . import config as cfg
 from . import db
+from .model_rates import (
+    build_model_display,
+    build_model_list,
+    get_rate,
+    parse_model_name,
+    strip_model_suffix,
+    sync_model_rates,
+)
 from .scheduler import CronLoop
 
 # ---------------------------------------------------------------------------
@@ -59,6 +67,11 @@ from .scheduler import CronLoop
 
 BACKEND = "https://www.workbuddy.ai"
 DEFAULT_DOMAIN = "www.workbuddy.ai"
+
+
+def _get_region() -> str:
+    """根据 BACKEND 判断地区：workbuddy.ai → intl, tencent → cn。"""
+    return "intl" if "workbuddy.ai" in BACKEND else "cn"
 USER_AGENT = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
 
 
@@ -97,6 +110,24 @@ async def lifespan(app: FastAPI):
     _CRON.start()
     import logging
     logging.basicConfig(level=logging.INFO)
+    # 启动时自动触发倍率同步（若距上次同步 >24h）
+    try:
+        from .model_rates import get_last_sync, sync_model_rates as _sync_rates
+        import time as _time
+        if _time.time() - get_last_sync() > 86400:
+            sys.stderr.write("[model_rates] 首次启动，触发倍率同步...\n")
+            models = get_available_models()
+            region = "intl" if "workbuddy.ai" in BACKEND else "cn"
+            await _sync_rates(
+                backend=BACKEND,
+                get_account_token_fn=_get_first_token,
+                region=region,
+                models=models,
+                user_agent=USER_AGENT,
+                domain=DEFAULT_DOMAIN,
+            )
+    except Exception as e:
+        sys.stderr.write(f"[model_rates] 倍率同步失败: {e}\n")
     try:
         yield
     finally:
@@ -452,6 +483,15 @@ def _cred() -> dict:
         )
 
 
+def _get_first_token() -> str | None:
+    """获取第一个可用账号的 accessToken（供倍率同步等后台任务使用）。"""
+    try:
+        acct = pool.acquire()
+        return acct.get("headers", {}).get("Authorization", "").removeprefix("Bearer ")
+    except Exception:
+        return None
+
+
 @app.get("/health")
 def health():
     info: dict = {
@@ -471,10 +511,9 @@ def list_models(
 ):
     _check_auth(authorization, x_api_key)
     models = get_available_models()
-    data = [
-        {"id": m, "object": "model", "created": 1700000000, "owned_by": "codebuddy"}
-        for m in models
-    ]
+    # 根据后端判断地区（BACKEND 含 workbuddy.ai → intl，含 tencent → cn）
+    region = "intl" if "workbuddy.ai" in BACKEND else "cn"
+    data = build_model_list(models, region)
     return {"object": "list", "data": data}
 
 
@@ -513,6 +552,8 @@ async def chat_completions(
     client_wants_stream = bool(payload.get("stream"))
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     body.setdefault("model", "auto")
+    # 剥离 :region:rate 后缀，透传纯上游模型名
+    body["model"] = strip_model_suffix(body["model"])
     # 后端只支持流式：始终以 stream=True 调后端，非流式由转换器聚合
     body["stream"] = True
     if "stream_options" not in body:
@@ -703,11 +744,16 @@ async def _collect_stream(response: httpx.Response) -> dict:
     message = {"role": "assistant", "content": "".join(content_parts) or None}
     if tcs:
         message["tool_calls"] = tcs
+    # 装饰模型名：带上 region:rate 后缀
+    shown_model = model or "unknown"
+    if shown_model != "unknown" and parse_model_name(shown_model)[1] == "":
+        region = _get_region()
+        shown_model = build_model_display(shown_model, region, get_rate(shown_model, region))
     return {
         "id": "chatcmpl-" + os.urandom(12).hex(),
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": model or "unknown",
+        "model": shown_model,
         "choices": [
             {"index": 0, "message": message, "finish_reason": finish_reason or "stop"}
         ],
@@ -768,6 +814,11 @@ async def _stream_upstream(
                 continue
             if obj.get("usage"):
                 usage.update(obj["usage"])
+            # 模型名装饰：带上 region:rate 后缀
+            m = obj.get("model")
+            if m and parse_model_name(m)[1] == "":
+                region = _get_region()
+                obj["model"] = build_model_display(m, region, get_rate(m, region))
             for ch in obj.get("choices") or []:
                 if ch.get("finish_reason"):
                     finish_reason = ch["finish_reason"]
@@ -954,6 +1005,8 @@ async def create_response(
 
     chat_body, projection_stats = project_responses_chat_body(chat_body)
     chat_body.setdefault("model", "auto")
+    # 剥离 :region:rate 后缀
+    chat_body["model"] = strip_model_suffix(chat_body["model"])
     chat_body["stream"] = True
     if "stream_options" not in chat_body:
         chat_body["stream_options"] = {"include_usage": True}
@@ -1004,7 +1057,7 @@ async def create_response(
             raise HTTPException(
                 status_code=status_code, detail=_safe_err_raw(raw, status_code)
             )
-        converter = ResponsesStreamConverter(model=model_name)
+        converter = ResponsesStreamConverter(model=model_name, region=_get_region())
         for line in raw.decode("utf-8", "replace").splitlines():
             converter.feed_line(line)
         chat_body = final_body
@@ -1037,7 +1090,7 @@ async def _stream_responses(
     rid: str = "",
 ):
     """消费后端 Chat SSE，实时转换为 Responses API 事件流输出。"""
-    converter = ResponsesStreamConverter(model=model_name)
+    converter = ResponsesStreamConverter(model=model_name, region=_get_region())
     prefix = f"[{rid}] " if rid else ""
 
     try:
@@ -1137,6 +1190,8 @@ async def create_message(
         )
 
     chat_body.setdefault("model", "auto")
+    # 剥离 :region:rate 后缀
+    chat_body["model"] = strip_model_suffix(chat_body["model"])
     # 读取用户的 stream 参数，如果未提供则默认为 True
     user_stream = payload.get("stream", True)
     # 无论用户如何设置，都向后端请求流式响应（后端只支持流式）
@@ -1194,7 +1249,7 @@ async def _collect_anthropic_nonstream(
     rid: str = "",
 ) -> dict:
     """收集完整的流式响应并返回非流式 Anthropic Message 对象。"""
-    converter = AnthropicStreamConverter(model=model_name)
+    converter = AnthropicStreamConverter(model=model_name, region=_get_region())
     prefix = f"[{rid}] " if rid else ""
 
     try:
@@ -1240,7 +1295,7 @@ async def _stream_anthropic(
     rid: str = "",
 ):
     """消费后端 OpenAI Chat SSE，实时转换为 Anthropic Messages SSE 事件流。"""
-    converter = AnthropicStreamConverter(model=model_name)
+    converter = AnthropicStreamConverter(model=model_name, region=_get_region())
     prefix = f"[{rid}] " if rid else ""
 
     try:
